@@ -1,0 +1,1158 @@
+---
+title: "GlandSTSP_Notes"
+author: "Silvia Carboni"
+date: "2025-02-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Gland ST-SP Project
+#Summary:
+Objectives of the study: 1) to describe the taxonomy and functional capacity of microbes located in sternal and suprapubic glands of two wild sympatric tamarin species, and 2) to test predictions stemming from the fermentation hypothesis. Specifically, a) that microbes linked to volatile odour production will be present in these glands, and that b) there will be a greater microbial diversity and increased abundance of microbes and metabolic pathways linked to odor production in the suprapubic glands, which are more frequently used during scent marking compared to the sternal glands.
+
+
+```{r}
+library(mia)
+library(Matrix)
+library(lme4)
+library(MuMIn)
+library(lmerTest)
+library(sjPlot)
+library(gridExtra)
+
+library(readr)
+library(dplyr)
+library(phyloseq)
+library(ggplot2)
+library(remotes)
+library(decontam)
+library(microbiome)
+library(compositions)
+library(microViz)
+library(RColorBrewer)
+library(ANCOMBC)
+library(car)
+library(vegan)
+library(ggpubr)
+library(knitr)
+library(dplyr)
+
+library(data.table)
+library(tidyverse)
+library(ggrepel)
+library(viridis)
+library(patchwork)
+
+library(TreeSummarizedExperiment)
+
+
+setwd("C:/Users/silvi/OneDrive - University of Calgary/CALGARY PHD/2ndyear/PhDproject/Analysis_STSP")
+```
+
+### KAIJU
+
+#Building a phyloseq object
+Need to upload in R the tsv file with all the abundances, the taxa information and the metadata to build a phyloseq object:
+
+```{r}
+
+dataK <- read.delim("kaiju_summary.tsv", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+dataK2 <- dataK %>%
+  dplyr::select(-OTU_ID)
+
+otuK <- dataK2 %>%
+  pivot_wider(
+    names_from = Sample,
+    values_from = Abundance,
+    values_fill = list(Abundance = 0),  
+    values_fn = sum)
+  
+otuK <- as.data.frame(otuK)
+
+otuK <- otuK %>%
+  mutate(Taxon_Name = ifelse(grepl("^unclassified", Taxon_Name, ignore.case = TRUE), 
+                            "Unclassified", 
+                            Taxon_Name))
+
+#column names, sobstitute and clean
+names(otuK) = gsub(pattern = "_L005", replacement = "", x = names(otuK)) #cleaning up sample names
+names(otuK) = gsub(pattern = "AM-SC-94s-", replacement = "", x = names(otuK))
+names(otuK) = gsub(pattern = "_S[0-9]+", replacement = "", x = names(otuK))  ## to remove the _S in the name
+
+#transform the NA in 0
+otuK[is.na(otuK)] <- 0
+
+
+##now the taxa
+taxaK<- otuK %>% 
+  select(Taxon_Name) %>% 
+  separate(Taxon_Name, c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+           "; ")  
+
+taxaK<- taxaK %>% 
+  mutate_if(is.character, as.factor)
+
+taxaK <- cbind(otuK$Taxon_Name, taxaK)
+
+colnames(taxaK)[1]<- "Taxon_Name"
+
+rownames(otuK)<- otuK$Taxon_Name
+rownames(taxaK)<- taxaK$Taxon_Name
+
+otuK$Taxon_Name[duplicated(otuK$Taxon_Name)] 
+
+otuK <- otuK %>% 
+  select(-Taxon_Name)
+
+taxaK<- taxaK %>% 
+  select(-Taxon_Name)
+
+
+otu_matK<- as.matrix(otuK)
+tax_matK<- as.matrix(taxaK)
+
+
+phylo_OTUK<- otu_table(otu_matK, taxa_are_rows = TRUE)
+phylo_TAXK<- tax_table(tax_matK)
+
+psK<- phyloseq(phylo_OTUK, phylo_TAXK)
+psK
+
+metadata <- read.csv("Data/Metadata_Clean_STSP.csv", fileEncoding = "UTF-8", sep = ";")
+
+setdiff(metadata$SampleID, names(otuK))  
+setdiff(names(otuK), metadata$SampleID)
+
+rownames(metadata) <- metadata$SampleID 
+
+x <- phyloseq::sample_data(metadata) 
+psK <- merge_phyloseq(psK, x)
+psK
+
+```
+
+#Unclassified taxa and classification rate
+Explore the data and start polishing
+
+```{r}
+
+otu_df <- as.data.frame(otu_table(psK))
+
+which(rownames(otu_df) == "Unclassified")
+
+if ("Unclassified" %in% rownames(otu_df)) {
+  total_abundance <- sum(colSums(otu_df, na.rm = TRUE))
+  unclassified_abundance <- sum(otu_df["Unclassified", , drop = FALSE], na.rm = TRUE)
+  percentage_unclassified <- (unclassified_abundance / total_abundance) * 100
+  percentage_unclassified}
+
+
+###OVERALL CLASSIFICATION RATE
+
+otu_df <- as.data.frame(otu_table(psK))
+total_abundance_all <- sum(colSums(otu_df, na.rm = TRUE))
+
+
+if ("Unclassified" %in% rownames(otu_df)) {
+  unclassified_abundance_all <- sum(otu_df["Unclassified", , drop = FALSE], na.rm = TRUE)  
+} else {
+  unclassified_abundance_all <- 0}
+
+
+classified_abundance_all <- total_abundance_all - unclassified_abundance_all
+classification_rate_all <- (classified_abundance_all / total_abundance_all) * 100 
+
+
+
+##Get rid of Unclassified by deleting everything that has NA and Candidatus
+taxa_df <- as.data.frame(tax_table(psK))
+otu_df <- as.data.frame(otu_table(psK))
+
+taxa_df[taxa_df == "NA"] <- NA
+taxa_df[taxa_df == "na"] <- NA
+
+sum(is.na(taxa_df))
+sum(is.na(otu_df))
+sum(taxa_df == "NA", na.rm = TRUE)
+any(grepl("Candidatus", taxa_df))
+
+
+taxa_to_keep <- rownames(taxa_df[ 
+  !apply(taxa_df, 1, function(row) any(grepl("Candidatus", row))) &  
+    complete.cases(taxa_df), ])
+
+
+psK_sp <- prune_taxa(taxa_to_keep, psK)
+psK_sp
+
+####Filter if across samples there are more than 10
+psK_filt <- prune_taxa(taxa_sums(psK_sp) >= 10, psK_sp)
+psK_filt
+
+```
+
+
+#Blanks and Controls
+Check for potential contaminants from the field (blanks) and lab (controls). First look at how each blank collected in each group affects the samples of that given group. Then remove the contaminants from the controls
+
+```{r}
+# GROUP S7
+S7 <- subset_samples(psK_filt, GroupID=="S7")
+sample_data(S7)$is.neg <- sample_data(S7)$SampleType == "Blank"
+contamS7.prev <- isContaminant(S7, method="prevalence", neg="is.neg") 
+table(contamS7.prev$contaminant)
+
+#Repeat for each social group. Only SS and IC were contaminated.
+
+##Create a phyloseq just for controls
+CTR <- subset_samples(psK_filt, SampleType=="Control")
+
+#Remove from group SS
+contamSS.prev$contamSeq <- rownames(contamSS.prev) 
+toKeepdfSS <- contamSS.prev %>% filter(contaminant == "FALSE") 
+toKeepListSS <- toKeepdfSS$contamSeq 
+SS_prune <- prune_taxa(toKeepListSS, SS)
+
+#Remove from group IC
+contamIC.prev$contamSeq <- rownames(contamIC.prev) 
+toKeepdfIC <- contamIC.prev %>% filter(contaminant == "FALSE") 
+toKeepListIC <- toKeepdfIC$contamSeq 
+IC_prune <- prune_taxa(toKeepListIC, IC) 
+
+##now merge all of them to have back the taxa with no blanks
+psk2 <- merge_phyloseq(S7, MI, AR, SS_prune, GP, JI, IC_prune, OI, WI, YM, WF, GD, CTR)
+psk2
+
+##CONTROLS
+sample_data(psk2)$is.neg <- sample_data(psk2)$SampleType == "Control" 
+contamdf.prev <- isContaminant(psk2, method="prevalence", neg="is.neg") 
+table(contamdf.prev$contaminant)
+
+contamdf.prev$contamSeq <- rownames(contamdf.prev) 
+toKeepdf <- contamdf.prev %>% filter(contaminant == "FALSE") 
+toKeepList <- toKeepdf$contamSeq 
+psk3 <- prune_taxa(toKeepList, psk2) 
+psk3
+
+
+### Pruning controls and blanks from the phyloseq object
+
+samplesKeep <- prune_samples(sample_data(psk3)$SampleType == "Sample", psk3) 
+psk4 <- samplesKeep
+
+#Now I need to delete the taxa that where only in CTR and Blanks
+sum(rowSums(otu_table(psk4)) == 0)
+samplesNotEmpty <- prune_taxa(!rowSums(otu_table(psk4)) == 0, psk4)
+psk4 <- samplesNotEmpty
+
+
+saveRDS(psk4, file = "RDS/phyloseq_object_nocontam.rds")
+psk4 <- readRDS("RDS/phyloseq_object_nocontam.rds")
+
+
+####THRESHOLD
+psk4_RA <- transform_sample_counts(psk4, function(x) x / sum(x))
+threshold <- 0.00001
+otu_table_ps_RA <- otu_table(psk4_RA)
+filtered_otus <- apply(otu_table_ps_RA, 1, function(x) any(x > threshold))
+psk4 <- prune_taxa(filtered_otus, psk4)
+
+
+saveRDS(psk4, file = "RDS/phyloseq_object_nocontam_treshold.rds")
+psk4 <- readRDS("RDS/phyloseq_object_nocontam_treshold.rds")
+
+```
+
+#Visualize the taxonomic content
+Plot the Relative abundances of Phyla with the prevalence of Species by tamarin species
+
+```{r}
+
+rel_abundance <- transform_sample_counts(psk4, function(x) x / sum(x))
+sampleLWED_RA <- subset_samples(rel_abundance, Species=="LWED")
+sampleSIMP_RA <- subset_samples(rel_abundance, Species=="SIMP")
+
+custom_palette <- colorRampPalette(brewer.pal(12, "Paired"))(81)
+
+glom_plotSIMP <- tax_glom(sampleSIMP_RA, taxrank = 'Phylum')  
+data_plotSIMP <- psmelt(glom_plotSIMP) 
+data_plotSIMP$Phylum <- as.character(data_plotSIMP$Phylum) 
+
+glom_plotLWED <- tax_glom(sampleLWED_RA, taxrank = 'Phylum')  
+data_plotLWED <- psmelt(glom_plotLWED) 
+data_plotLWED$Phylum <- as.character(data_plotLWED$Phylum) 
+
+
+GraphSIMP_Abundance <- ggplot(data=data_plotSIMP, aes(x = Sample, y = Abundance*100, fill = Phylum)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(x = expression("Samples from " ~ italic("Tamarinus imperator")), 
+    y = "Relative Abundance (%)", title="A)") +
+  theme(axis.text.x = element_blank(), panel.grid.major = element_blank(), legend.position = "none", plot.title=element_text(face="bold")) +
+  scale_fill_manual(values = custom_palette)
+GraphSIMP_Abundance
+
+GraphLWED_Abundance <- ggplot(data=data_plotLWED, aes(x = Sample, y = Abundance*100, fill = Phylum)) +
+  geom_bar(stat = "identity") +
+  theme_minimal()+
+  theme(axis.text.x = element_blank(),legend.position = "none") +
+  labs(x = expression("Samples from " ~ italic("Leontocebus weddelli")), y = "Relative Abundance (%)") +
+  theme(panel.grid.major = element_blank())+
+  scale_fill_manual(values = custom_palette)
+GraphLWED_Abundance
+
+RAbundance_Species <- ggarrange(GraphSIMP_Abundance, GraphLWED_Abundance, 
+                                nrow = 2, labels = NA, common.legend = TRUE, legend = "right")
+
+RAbundance_Species <- annotate_figure(RAbundance_Species, 
+                                      top = text_grob("A) Relative Abundance of Phyla", face = "bold", size = 14))
+
+#Prevalence of Taxa
+prevdf <- apply(X = otu_table(psk4),MARGIN = ifelse(taxa_are_rows(psk4), yes = 1, no = 2),FUN = function(x){sum(x > 0)})
+prevdf1 <- data.frame(Prevalence = prevdf,TotalAbundance = taxa_sums(psk4), tax_table(psk4))
+
+prev_species <- ggplot(prevdf1, aes(TotalAbundance, Prevalence / nsamples(psk4),color=Phylum)) +
+  geom_hline(yintercept = 0.5, alpha = 0.5, linetype = 2) +  
+  geom_point(size = 2, alpha = 0.8) +  
+  scale_x_log10() + 
+  labs(x="Total Abundance", y="Prevalence [Frac. Samples]", title="B)") + 
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(face="bold"),
+        legend.position = "none")+
+  scale_color_manual(values = custom_palette)
+
+```
+
+#Visualize taxa related to Odor production
+
+```{r}
+
+otu_table_rel <- otu_table(rel_abundance)
+mean_abundance_df <- data.frame(
+  OTU = taxa_names(rel_abundance),  
+  MeanRelativeAbundance = rowMeans(otu_table_rel))
+
+taxa_df <- as.data.frame(tax_table(rel_abundance))
+taxa_df$Species <- as.character(taxa_df$Species)
+taxa_df$Genus <- as.character(taxa_df$Genus)
+
+
+species_of_interest <- c("Staphylococcus epidermidis", "Micrococcus luteus", "Finegoldia magna","Proteus mirabilis","Corynebacterium frankenforstense", "Staphylococcus hominis", "Staphylococcus aureus",
+                         "Cutibacterium avidum", "Bacillus subtilis","Corynebacterium pseudogenitalium", 
+                         "Corynebacterium tuberculostearicum", "Lactobacillus johnsonii", 
+                         "Bacteroides fragilis", 
+                         "Corynebacterium striatum", "Staphylococcus haemolyticus", 
+                         "Malassezia furfur", "Corynebacterium jeikeium","Corynebacterium kefirresidentii")
+
+
+selected_taxa <- taxa_df[taxa_df$Species %in% species_of_interest, ]
+mean_abundance_df$Species <- taxa_df$Species[match(mean_abundance_df$OTU, rownames(taxa_df))]
+mean_abundance_df$Genus <- taxa_df$Genus[match(mean_abundance_df$OTU, rownames(taxa_df))]
+mean_abundance_df_filtered <- mean_abundance_df %>%
+  filter(Species %in% species_of_interest)
+
+
+MeanRA_Odor_Sp <- ggplot(mean_abundance_df_filtered, aes(x = reorder(Species, MeanRelativeAbundance), y = MeanRelativeAbundance*100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "Species", y = "Mean Relative Abundance (%)") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(face = "italic"),
+        legend.position="none")
+
+###Now the three most abundant in SIMP vs LWED
+top_species_odor <- c("Malassezia furfur", "Corynebacterium frankenforstense", "Staphylococcus aureus")
+rel_abundance_subset <- subset_samples(rel_abundance, Species %in% c("LWED", "SIMP"))
+                                       
+taxa_df_subset <- as.data.frame(tax_table(rel_abundance_subset))
+taxa_df_subset$Species <- as.character(taxa_df_subset$Species)
+taxa_of_interest_sub <- rownames(taxa_df_subset[taxa_df_subset$Species %in% top_species_odor, ])
+otu_table_subset <- otu_table(rel_abundance_subset)[taxa_of_interest_sub, ]
+
+data_plot_subset <- psmelt(rel_abundance_subset) %>%
+  filter(OTU %in% taxa_of_interest_sub) %>%
+  mutate(Species = factor(Species))
+
+p1 <- ggplot(subset(data_plot_subset, sample_Species == "LWED"), 
+             aes(x = Species, y = Abundance*100)) +
+  geom_boxplot(fill = NA, color = "black", size = 0.6) +
+  geom_jitter(aes(color = Gland, shape = Gland), width = 0.2, size = 2, alpha = 0.8) +
+  labs(x = NULL, y = "Relative Abundance (%)") +
+  coord_cartesian(ylim = c(0, 1.5)) +
+  facet_wrap(~ sample_Species, scales = "free_y", 
+             labeller = labeller(sample_Species = c("LWED" = "Leontocebus weddelli"), function(x) str_wrap(x, width = 15))) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, lineheight = 0.8),  # Breaks labels on the x-axis into multiple lines
+        legend.position = "none",  
+        strip.text = element_text(face = "italic", size = 12)) +
+  scale_color_manual(values = c("ST" = "purple", "SP" = "#66B2FF")) +  
+  scale_shape_manual(values = c("ST" = 16, "SP" = 17)) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) # Wrap x-axis labels into multiple lines
+
+
+p2 <- ggplot(subset(data_plot_subset, sample_Species == "SIMP"), 
+             aes(x = Species, y = Abundance*100)) +
+  geom_boxplot(fill = NA, color = "black", size = 0.6) +
+  geom_jitter(aes(color = Gland, shape = Gland), width = 0.2, size = 2, alpha = 0.8) +
+  labs(x = NULL, y = NULL) +
+  coord_cartesian(ylim = c(0, 0.6)) +
+  facet_wrap(~ sample_Species, scales = "free_y", 
+             labeller = labeller(sample_Species = c("SIMP" = "Tamarinus imperator"), function(x) str_wrap(x, width = 15))) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, lineheight = 0.8),  # Breaks labels on the x-axis into multiple lines
+        legend.title = element_text(face = "bold"),
+        strip.text = element_text(face = "italic", size = 12)) +
+  scale_color_manual(values = c("ST" = "purple", "SP" = "#66B2FF")) +  
+  scale_shape_manual(values = c("ST" = 16, "SP" = 17)) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) # Wrap x-axis labels into multiple lines
+
+RA_three_odor_sp<- grid.arrange(p1, p2, ncol = 2, widths=c(0.4,0.6))
+
+```
+
+#Alpha diversity test between gland types
+
+```{r}
+
+metadata_taxonomy <- as(sample_data(psk4), "data.frame") 
+metadata_taxonomy$readCount <- sample_sums(psk4) 
+
+adiv_taxonomy<-estimate_richness(psk4, measures=c("Chao1", "Shannon")) 
+metadata_taxonomy$shannon<-adiv_taxonomy$Shannon
+hist(metadata_taxonomy$shannon)
+metadata_taxonomy$chao1<-adiv_taxonomy$Chao1
+hist(metadata_taxonomy$chao1) 
+
+#GLMM tests
+modelShannon<-glmer(shannon ~ Gland*Species + (1 | GroupID/Name), family= Gamma(link = "log"), data=metadata_taxonomy)
+nullShannon<-glmer(shannon ~ 1 + (1 | GroupID/Name) , family= Gamma(link = "log"),data=metadata_taxonomy)
+model.sel(modelShannon,nullShannon,rank="AICc")
+summary(modelShannon) 
+r.squaredGLMM(modelShannon) 
+vif(modelShannon) 
+residualsShannon <- residuals(modelShannon)
+durbinWatsonTest(residualsShannon)
+
+modelChao<-glmer(chao1 ~ Gland*Species + (1 | GroupID/Name), family= Gamma(link = "log"), data=metadata_taxonomy)
+nullChao<-glmer(chao1 ~ 1+ (1 | GroupID/Name), family= Gamma(link = "log"),data=metadata_taxonomy)
+model.sel(modelChao,nullChao,rank="AICc")
+summary(modelChao)
+r.squaredGLMM(modelChao)
+vif(modelChao)
+residualsChao <- residuals(modelChao)
+durbinWatsonTest(residualsChao)
+
+
+#RESIDUALS
+#check if the read count correlated with SHANNON or chao
+ggplot(data = metadata_taxonomy, aes(x = readCount, y = shannon)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("\nRead Count") + ylab("Shannon index\n") +
+  theme_minimal()
+
+ggplot(data = metadata_taxonomy, aes(x = readCount, y = chao1)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("\nRead Count") + ylab("Chao1 index\n") +
+  theme_minimal()
+
+#yes, so
+ShanRichnessReadCount <- lm(shannon ~ readCount, data = metadata_taxonomy) 
+metadata_taxonomy$resid_shannon <- resid(ShanRichnessReadCount)
+hist(metadata_taxonomy$resid_shannon)
+metadata_taxonomy$resid_shannon <- resid(ShanRichnessReadCount) + 2
+
+ggplot(data = metadata_taxonomy, aes(x = readCount, y = resid_shannon)) +
+  geom_point()+
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("\nRead Count") + ylab("Resid Shannon") +
+  theme_minimal()
+
+ChaoRichnessReadCount <- lm(chao1 ~ readCount, data = metadata_taxonomy) 
+metadata_taxonomy$resid_chao <- resid(ChaoRichnessReadCount) 
+hist(metadata_taxonomy$resid_chao)
+
+ggplot(data = metadata_taxonomy, aes(x = readCount, y = resid_chao)) +
+  geom_point()+
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("\nRead Count") + ylab("Resid Chao") +
+  theme_minimal()
+
+
+modelShannonR<-glmer(resid_shannon ~ Gland*Species + (1 | GroupID/Name), family= Gamma(link = "log"), data=metadata_taxonomy)
+nullShannonR<-glmer(resid_shannon ~ 1+ (1 | GroupID/Name),family= Gamma(link = "log"),data=metadata_taxonomy)
+model.sel(modelShannonR, nullShannonR,rank="AICc")
+summary(modelShannonR)
+r.squaredGLMM(modelShannonR) 
+vif(modelShannonR) 
+residualsShannonR <- residuals(modelShannonR)
+durbinWatsonTest(residualsShannonR)
+
+
+##Plot the predictions
+prediction_data <- expand.grid(
+  Gland = c("SP", "ST"),
+  Species = c("LWED", "SIMP"))
+
+# Get predictions and standard errors (se.fit = TRUE will return the standard errors)
+predictions <- predict(modelShannon, newdata = prediction_data, type = "response", se.fit = TRUE, re.form = NA)
+
+# Add predicted values and standard errors to prediction_data
+prediction_data$shannon_pred <- predictions$fit
+prediction_data$se_fit <- predictions$se.fit
+# Calculate the 95% Confidence Interval (CI)
+z_value <- qnorm(0.975)  # For 95% CI
+
+# Calculate the lower and upper bounds of the CI
+prediction_data$ci_lower <- prediction_data$shannon_pred - z_value * prediction_data$se_fit
+prediction_data$ci_upper <- prediction_data$shannon_pred + z_value * prediction_data$se_fit
+
+shannon_prediction_plot <- ggplot(prediction_data, aes(x = Gland, y = shannon_pred, color = Species, group = Species)) +
+  geom_line(size=1) +  # Use lines to connect points for each Species
+  geom_point() +  # Add points for clarity
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper, fill = Species), alpha = 0.2) +  # Add confidence interval as ribbon
+  labs(x = "Gland", y = "Predicted Shannon Diversity", color = "Species", fill = "Species") +
+  theme_minimal() +
+  #ggtitle("Interaction between Gland Type and Tamarin Species on Shannon Diversity with 95% CI") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(face = "italic")) +
+  scale_color_manual(
+    values = c("LWED" = "darkorange", "TIMP" = "darkgreen")) +  
+  scale_fill_manual(values = c("LWED" = "gold", "TIMP" = "green")); shannon_prediction_plot
+
+
+#Plot the alpha diversity
+alpha<- estimate_richness(psk4, measures = c("Chao1", "Shannon"))
+alpha_df <- data.frame(Sample = sample_names(psk4), alpha, sample_data(psk4))
+
+
+ShanViol<-ggplot(alpha_df, aes(x = Gland, y = Shannon, fill = Gland)) +
+  geom_violin(trim = FALSE, linewidth = 0.2, alpha=1) +
+  geom_point(aes(color = Gland), position = position_jitter(width = 0.2), size = 2, alpha = 0.5) +
+  xlab("Gland") +
+  ylab("Shannon Diversity Index") +
+  theme_minimal()+
+  theme(legend.title = element_text(size=12, face = "bold"))+
+  scale_fill_manual(values = c("aquamarine", "lightpink")) +   # Specify colors for box plot
+  scale_color_manual(values = c("blue", "purple1"))
+  
+
+ChaoViol<-ggplot(alpha_df, aes(x = Gland, y = Chao1, fill = Gland)) +
+  geom_violin(trim = FALSE, linewidth = 0.2) +
+  geom_point(aes(color = Gland), position = position_jitter(width = 0.2), size = 2, alpha = 0.5) +
+  xlab("Gland") +
+  ylab("Chao1 Richness Index") +
+  scale_fill_manual(values = c("aquamarine", "lightpink")) +   # Specify colors for box plot
+  scale_color_manual(values = c("blue", "purple1"))+ 
+  theme_minimal()+
+  theme(legend.title = element_text(size=12, face = "bold"))
+
+
+Alpha_Violin <- ggarrange(ShanViol, ChaoViol, ncol = 2, common.legend = TRUE, legend = "bottom");Alpha_Violin
+
+```
+
+#Beta diversity between gland types
+
+```{r}
+psk5<- microbiome::transform(psk4, "compositional", transorm="rclr")
+psk5
+
+saveRDS(psk5, file = "RDS/ps_CLRtrasnf.rds")
+psk5 <- readRDS("RDS/ps_CLRtrasnf.rds")
+
+sample_taxa_tablek <- t(as(otu_table(psk5),"matrix"))  
+aitch_dist_vegk <- vegdist(sample_taxa_tablek, method = "robust.aitchison")
+metadata_df <- as(sample_data(psk5), "data.frame")
+
+#PERMANOVA
+beta_test_k_gl <-adonis2(
+  aitch_dist_vegk ~ Gland*Species + Age + Sex,
+  data = metadata_df, permutations = 999, method="robust.aitchison", by = "margin", strata=metadata_df$GroupID) 
+print(beta_test_k_gl)
+
+#Visualization
+PCoA.mat<-capscale(aitch_dist_vegk~1,distance="robust.aitchison") 
+PCoA.mat$CA$eig[1:3]/sum(PCoA.mat$CA$eig)
+eig <- PCoA.mat$CA$eig
+
+mdTest <- metadata_df %>% 
+  arrange(SampleID)
+metadata_pca <- mdTest
+row.names(metadata_pca)<-row.names(scores(PCoA.mat)$sites) 
+
+metadata_pca$PCoA1<-scores(PCoA.mat)$sites[,1]
+metadata_pca$PCoA2<-scores(PCoA.mat)$sites[,2]
+
+
+metadata_pca$Gland <- factor(metadata_pca$Gland, levels = c("ST", "SP")) 
+
+colours_scheme <- c("SP"= "#66B2FF", "ST" = "purple")
+
+betaDivPCoAStatus <- ggplot(metadata_pca, aes(PCoA1, PCoA2, color = Gland)) +
+  geom_point(size = 3, alpha=0.7) +
+  labs(x = "\nPCoA1 [19.0% variance]", y = "PCoA2 [7.2% variance]\n") +
+  theme_minimal() + 
+  stat_ellipse(level=0.85, size=0.8) +
+  scale_colour_manual(values = colours_scheme, aesthetics = c("fill", "colour"), name = "Gland") +
+  theme_bw() +
+  ggside::geom_xsidedensity(aes(fill = Gland), alpha = 0.5, show.legend = FALSE) +
+  ggside::geom_ysidedensity(aes(fill = Gland), alpha = 0.5, show.legend = FALSE) +
+  ggside::theme_ggside_void()+
+  theme(text = element_text(size = 14),
+        legend.position = "bottom"); betaDivPCoAStatus
+
+```
+
+#Differential Abundance analysis of the taxa
+
+```{r}
+
+sampleLWED <- subset_samples(psk4, Species=="LWED")
+sampleSIMP <- subset_samples(psk4, Species=="SIMP")
+
+#species taxa LWED
+ancombc_k_species_LWED = ancombc2(data = sampleLWED,
+                                    rank = "Species",
+                                    tax_level = "Species",
+                                    fix_formula = "Gland",
+                                    p_adj_method = "holm",
+                                    pseudo_sens = TRUE,
+                                    prv_cut = 0.10, 
+                                    lib_cut = 1000, 
+                                    s0_perc = 0.05,
+                                    group = "Gland", 
+                                    struc_zero = TRUE, neg_lb = TRUE,
+                                    alpha = 0.05, n_cl = 2, verbose = TRUE,
+                                    global = FALSE, pairwise = FALSE, dunnet = FALSE, trend = FALSE,
+                                    iter_control = list(tol = 1e-2, max_iter = 20, 
+                                                        verbose = TRUE),
+                                    em_control = list(tol = 1e-5, max_iter = 100),
+                                    lme_control = lme4::lmerControl(),
+                                    mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                                    trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                                nrow = 2, 
+                                                                                byrow = TRUE)),
+                                                         node = list(2),
+                                                         solver = "ECOS",
+                                                         B = 10))
+
+ancombc_k_species_SIMP = ancombc2(data = sampleSIMP,
+                                    rank = "Species",
+                                    tax_level = "Species",
+                                    fix_formula = "Gland",
+                                    p_adj_method = "holm",
+                                    pseudo_sens = TRUE,
+                                    prv_cut = 0.10, 
+                                    lib_cut = 1000, 
+                                    s0_perc = 0.05,
+                                    group = "Gland", 
+                                    struc_zero = TRUE, neg_lb = TRUE,
+                                    alpha = 0.05, n_cl = 2, verbose = TRUE,
+                                    global = FALSE, pairwise = FALSE, dunnet = FALSE, trend = FALSE,
+                                    iter_control = list(tol = 1e-2, max_iter = 20, 
+                                                        verbose = TRUE),
+                                    em_control = list(tol = 1e-5, max_iter = 100),
+                                    lme_control = lme4::lmerControl(),
+                                    mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                                    trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                                nrow = 2, 
+                                                                                byrow = TRUE)),
+                                                         node = list(2),
+                                                         solver = "ECOS",
+                                                         B = 10))
+
+saveRDS(ancombc_k_species_LWED, file = "RDS/ANCOMBC_Kaiju_LWED_species.rds")
+# Later, when you start a new R session, load it
+ancombc_k_species_LWED <- readRDS("RDS/ANCOMBC_Kaiju_LWED_species.rds")
+
+saveRDS(ancombc_k_species_SIMP, file = "RDS/ANCOMBC_Kaiju_SIMP_species.rds")
+# Later, when you start a new R session, load it
+ancombc_k_species_SIMP <- readRDS("RDS/ANCOMBC_Kaiju_SIMP_species.rds")
+
+
+
+#At the species level
+sig.tax.ancom2k_spe_LWED= ancombc_k_species_LWED$res %>% 
+  filter(diff_GlandST == TRUE) %>% #taxa identified as DA
+  filter(passed_ss_GlandST == TRUE) %>% #taxa resilient to different treatment of 0's
+  filter(q_GlandST < 0.01) %>% #taxa with an ajd p-value of <0.05
+  arrange(desc(abs(lfc_GlandST)))
+
+sig.tax.ancom2k_spe_SIMP= ancombc_k_species_SIMP$res %>% 
+  filter(diff_GlandST == TRUE) %>% #taxa identified as DA
+  filter(passed_ss_GlandST == TRUE) %>% #taxa resilient to different treatment of 0's
+  filter(q_GlandST < 0.01) %>% #taxa with an ajd p-value of <0.05
+  arrange(desc(W_GlandST))
+
+
+sig.tax.ancom2k_spe_LWED$taxon <- gsub(".*; ([^;]+)$", "\\1", sig.tax.ancom2k_spe_LWED$taxon)
+sig.tax.ancom2k_spe_LWED$association = ifelse(sig.tax.ancom2k_spe_LWED$q_GlandST < 0.01 & sig.tax.ancom2k_spe_LWED$lfc_GlandST > 0, "ST Gland", "Not singificant")
+sig.tax.ancom2k_spe_LWED$association = ifelse(sig.tax.ancom2k_spe_LWED$q_GlandST < 0.01 & sig.tax.ancom2k_spe_LWED$lfc_GlandST < 0, "SP Gland",sig.tax.ancom2k_spe$association)
+
+sig.tax.ancom2k_spe_LWED$taxon <- factor(sig.tax.ancom2k_spe_LWED$taxon, 
+                                         levels = sort(unique(sig.tax.ancom2k_spe_LWED$taxon)))
+
+
+sig.tax.ancom2k_spe_SIMP$taxon <- gsub(".*; ([^;]+)$", "\\1", sig.tax.ancom2k_spe_SIMP$taxon)
+sig.tax.ancom2k_spe_SIMP$association = ifelse(sig.tax.ancom2k_spe_SIMP$q_GlandST < 0.01 & sig.tax.ancom2k_spe_SIMP$lfc_GlandST > 0, "ST Gland", "Not singificant")
+sig.tax.ancom2k_spe_SIMP$association = ifelse(sig.tax.ancom2k_spe_SIMP$q_GlandST < 0.01 & sig.tax.ancom2k_spe_SIMP$lfc_GlandST < 0, "SP Gland",sig.tax.ancom2k_spe$association)
+
+
+sig.tax.ancom2k_spe_SIMP$taxon <- factor(sig.tax.ancom2k_spe_SIMP$taxon, 
+                                    levels = sort(unique(sig.tax.ancom2k_spe_SIMP$taxon)))
+
+sig.tax.ancom2k_spe_LWED$q_GlandST
+
+colours_scheme_ancom <- c("SP Gland"= "#66B2FF", "ST Gland" = "purple")
+
+plot_spe_ancom_LWED<-ggplot(sig.tax.ancom2k_spe_LWED, aes(y = reorder(taxon, abs(lfc_GlandST)), x = lfc_GlandST, color = association))+ #reorder(taxon, lfc_GlandST) only if not with RA
+  geom_point() +
+  theme_bw() +
+  xlim(-4,1)+
+  geom_segment(aes(x=0, xend=lfc_GlandST, y=taxon, yend=taxon, color = association), size=1.5) +
+  geom_vline(xintercept = 0, size=0.3) +
+  labs(x="Log Fold Difference (Effect Size)", y="Differentially Abundant Species (p-adj<0.01)", title="ANCOM-BC test") +
+  scale_colour_manual (values = colours_scheme_ancom)+
+  theme(legend.title = element_blank(), legend.position = "bottom", axis.text.y = element_text(face = "italic")); plot_spe_ancom_LWED
+
+
+```
+
+##FUNCTIONAL ANALYSIS
+Import in R the table of metabolic pathways generated with Humann3_6
+
+```{r}
+
+path.abundance <- fread("merged_pathabundances_cmp.tsv")
+path.abundance <- as_tibble(path.abundance)
+
+
+# clean the file names
+colnames(path.abundance)[1] <- "pathway"
+colnames(path.abundance) <- gsub("AM.SC.94s-","", colnames(path.abundance))
+colnames(path.abundance) <- gsub("_S[0-9]+_L005_Abundance","", colnames(path.abundance))
+
+# remove unmapped and ungrouped reads
+pathab_clean <- path.abundance %>% filter(!str_detect(pathway, "UNMAPPED|UNINTEGRATED"))
+
+#filter to keep only the metabolic pathways and the genes, deleting the species responsible for them
+pathab_metab <- pathab_clean %>%
+  dplyr::filter(!grepl('\\|g_', pathway))%>% 
+  dplyr::filter(!grepl('\\|unclassified', pathway))
+
+#filter to keep only the metabolic pathways without the genes responsible for them
+pathab_metab_nogene <- pathab_metab %>%
+  mutate(pathway = gsub("^[^:]+: ", "", pathway)) 
+
+
+############Blanks and controls
+pathab_nogene_rows <- as.data.frame(pathab_metab_nogene)
+rownames(pathab_nogene_rows) <- pathab_nogene_rows$pathway
+pathab_nogene_rows <- pathab_nogene_rows %>%
+  select(-pathway) %>%
+  t()
+pathab_nogene_rows<-as.matrix(pathab_nogene_rows) 
+
+control_samples <- c(
+  'FPI18814', 'FPI16198', 'FPI16234', 'FPI14705', 'FPI14657', 'FPI16208',
+  'FPI16166', 'FPI18908', 'FPI16190', 'FPI16236', 'FPI18944', 'FPI16209',
+  'FPI18916', 'FPI18822', 'FPI19319', 'FPI14659', 'FPI13958', 'FPI16175')
+
+controls <- colnames(pathab_nogene_rows) %in% control_samples 
+contam_results <- isContaminant(pathab_nogene_rows, method = "prevalence", 
+                                neg = controls)
+table(contam_results$contaminant) #none is contaminant
+
+###delete the pathways in the blanks and controls
+pathab_nogene_noctr <- pathab_metab_nogene %>%
+  select(-FPI18814,
+         -FPI16198,
+         -FPI16234,
+         -FPI14705,
+         -FPI14657,
+         -FPI16208,
+         -FPI16166,
+         -FPI18908,
+         -FPI16190,
+         -FPI16236,
+         -FPI18944,
+         -FPI16209,
+         -FPI18916,
+         -FPI18822,
+         -FPI19319,
+         -FPI14659,
+         -FPI13958,
+         -FPI16175)
+
+ 
+ ##Import metadata
+metadataf <- read.csv("Data/Metadata_Clean_STSP.csv", fileEncoding = "UTF-8", sep = ";")
+
+metadata_funct <- metadataf %>%     
+  dplyr::filter(SampleType == "Sample")
+
+pathab2 <- pathab_nogene_noctr %>%
+pivot_longer(cols = -pathway, names_to = "SampleID", values_to = "Abundance")
+
+pathab_met <- pathab2 %>%
+  left_join(metadata_funct, by = "SampleID")
+
+```
+
+#Describe the most abundant pathways and the ones related to odor production
+
+```{r}
+
+gland_SIMP_path <- pathab_met %>% filter(Species == "SIMP")
+gland_LWED_path <- pathab_met %>% filter(Species == "LWED")
+
+#Calculate total abundance per pathway
+abundance_SIMP <- gland_SIMP_path %>%
+  group_by(pathway) %>%
+  summarise(Total_Abundance = sum(Abundance), .groups = 'drop') %>% 
+  arrange(desc(Total_Abundance)) %>%
+  slice_head(n = 10) %>%
+  mutate(Species = "SIMP")
+
+abundance_LWED <- gland_LWED_path %>%
+  group_by(pathway) %>%
+  summarise(Total_Abundance = sum(Abundance), .groups = 'drop') %>%
+  arrange(desc(Total_Abundance)) %>%
+  slice_head(n = 10) %>%
+  mutate(Species = "LWED")
+
+top_data_LWEDSIMP <- bind_rows(abundance_LWED, abundance_SIMP)
+
+top10_gland_funct <- ggplot(top_data_LWEDSIMP, aes(x = reorder(pathway, -Total_Abundance), y = Total_Abundance, fill = Species)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Pathways", y = "Abundance in CMP", title="C)") +
+  theme_minimal() +
+  theme(plot.title.position="plot", plot.title=element_text(face="bold"), axis.text.x = element_text(angle = 60, size=8, hjust = 1),legend.title = element_text(face="bold")) +
+  scale_fill_manual(
+    values = c("SIMP" = "orange", "LWED" = "lightgreen"),
+    labels = c("SIMP" = expression(italic("Tamarinus imperator")), 
+               "LWED" = expression(italic("Leontocebus weddelli"))))   
+ 
+
+#Select and visualize the pathways linked to odor production
+filtered_data_odor <- pathab_metab_nogene %>%
+  filter(grepl("amino acid|lactate|lipid|lipase|fatty acid biosynthesis|branched-chain amino acid|isoleucine|valine|pyruvate", pathway, ignore.case = TRUE)) %>%
+  column_to_rownames("pathway")  
+
+mean_abundance_odor <- rowMeans(filtered_data_odor, na.rm = TRUE)
+mean_abundance_odor <- tibble(
+  Pathway = names(mean_abundance_odor),  
+  MeanAbundance = mean_abundance_odor)    
+
+mean_abundance_odor <- mean_abundance_odor %>%
+  filter(!grepl("initiation|plant", Pathway, ignore.case = TRUE),  
+    MeanAbundance > 1.3e-06)%>% 
+  mutate(Pathway = case_when(
+    Pathway == "superpathway of glycolysis, pyruvate dehydrogenase, TCA, and glyoxylate bypass" ~ "superpathway of glycolysis, pyruvate dehydrogenase",
+    Pathway == "superpathway of sulfur amino acid biosynthesis (Saccharomyces cerevisiae)" ~ "superpathway of sulfur amino acid biosynthesis",
+    TRUE ~ Pathway))
+  
+
+Abu_Odor_Path<-ggplot(mean_abundance_odor, aes(x = reorder(Pathway, MeanAbundance), y = MeanAbundance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip()+
+  theme_minimal() +
+  labs(x = "Pathway", y = "Mean Abundance")+ 
+  theme(axis.text.x = element_text(angle = 0, hjust = 1), plot.title = element_text(hjust = 1.2))
+
+###now represent the three most abundant in SIMP vs LWED
+top_path_odor <- c("L-valine biosynthesis","pyruvate fermentation to isobutanol (engineered)","superpathway of aromatic amino acid biosynthesis")
+
+path_met_odor <- pathab_met %>%
+  filter(pathway %in% top_path_odor)%>%
+  mutate(pathway = case_when(
+    pathway == "pyruvate fermentation to isobutanol (engineered)" ~ "pyruvate fermentation to isobutanol",
+    pathway == "superpathway of aromatic amino acid biosynthesis" ~ "aromatic amino acid biosynthesis",
+    TRUE ~ pathway)) 
+
+three_path_odor<-ggplot(path_met_odor, aes(x = reorder(pathway, -Abundance), y = Abundance)) +
+  geom_boxplot(fill = NA, color = "black", size = 0.6) +
+  geom_jitter(aes(color = Gland, shape = Gland), width = 0.2, size = 2, alpha = 0.8) +
+  facet_wrap(~ Species, scales = "free_y", labeller = labeller(Species = c("LWED" = "Leontocebus weddelli", "SIMP" = "Tamarinus imperator"), function(x) str_wrap(x, width = 15))) +
+  labs(x = NULL, 
+       y = "Abundance in CMP") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        legend.position = "right", legend.title = element_text(face="bold"),
+        strip.text = element_text(face = "italic", size = 12)) +
+  scale_color_manual(values = c("ST" = "purple", "SP" = "#66B2FF")) +  
+  scale_shape_manual(values = c("ST" = 16, "SP" = 17))+
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+
+```
+
+#Alpha and Beta Diversity measures for metabolic pathways
+
+```{r}
+
+#Alpha diversity
+pathab3 <- as.data.frame(pathab_nogene_noctr) #otherwise it does not keep the rownames (it was a tibble)
+rownames(pathab3)  <- pathab3$pathway
+pathab3 <- pathab3 %>% select(-pathway)
+
+
+sample_function_table <- t(pathab3)
+
+shan_funct <- vegan::diversity(sample_function_table, index = "shannon")
+rich_funct <- vegan::specnumber(sample_function_table) #finds the number of species
+simp_funct <- vegan::diversity(sample_function_table, index = "simpson")
+
+alpha_df_funct <- data.frame(SampleID = rownames(sample_function_table), 
+                       Richness = rich_funct,
+                       Shannon = shan_funct,
+                       Simpson = simp_funct)
+
+alpha_df_funct <- metadata_funct %>%
+  left_join(alpha_df_funct, by = "SampleID")
+
+
+Shannon_Funct <- ggplot(alpha_df_funct, aes(x = Gland, y = Shannon, fill = Gland)) +
+  geom_violin(alpha = 0.5) + 
+  geom_point(aes(color = Gland), position = position_jitter(width = 0.2), size = 2) +
+  xlab("Gland") +
+  ylab("Shannon Diversity Index") +
+  scale_fill_manual(values = c("lightgreen", "yellow2")) +   
+  scale_color_manual(values = c("darkgreen", "orange"))+ 
+  theme_minimal()
+
+Richness_Funct <- ggplot(alpha_df_funct, aes(x = Gland, y = Richness, fill = Gland)) +
+  geom_violin(alpha = 0.5) + 
+  geom_point(aes(color = Gland), position = position_jitter(width = 0.2), size = 2) +
+  xlab("Gland") +
+  ylab("Richness of pathways") +
+  scale_fill_manual(values = c("lightgreen", "yellow2")) +
+  scale_color_manual(values = c("darkgreen", "orange"))+ 
+  theme_minimal()
+
+#GLMM models
+Shann_Funct_model <- glmer(Shannon ~ Gland*Species + (1 | GroupID/Name), family= Gamma(link = "log"), data=alpha_df_funct)
+null_fun_sha <- glmer(Shannon ~ 1 + (1 | GroupID/Name), family= Gamma(link = "log"), data=alpha_df_funct)
+model.sel(Shann_Funct_model,null_fun_sha,rank="AICc")
+summary(Shann_Funct_model)
+r.squaredGLMM(Shann_Funct_model)
+
+Rich_Funct_model <- glmer(Richness ~ Gland * Species + (1 | GroupID/Name), family= Gamma(link = "log"), data=alpha_df_funct)
+null_fun_ric <- glmer(Richness ~ 1 + (1 | GroupID/Name), family= Gamma(link = "log"), data=alpha_df_funct)
+model.sel(Rich_Funct_model,null_fun_ric,rank="AICc")
+summary(Rich_Funct_model)
+r.squaredGLMM(Rich_Funct_model)
+
+##Beta diversity
+pathab_matrix <- as.matrix(pathab3)
+
+tse <- TreeSummarizedExperiment(assays = list(counts = pathab_matrix),
+                                colData = metadata_funct)
+vegdist_fun <- as.matrix(vegdist(sample_function_table, method="robust.aitchison", binary=FALSE, diag=TRUE, upper=TRUE, na.rm = FALSE))
+
+aitch_dist_veg_funct <- vegdist(t(assay(tse)), method = "robust.aitchison")
+
+aitch_pcoa <- ecodist::pco(aitch_dist_veg_funct)
+aitch_pcoa_df <- data.frame(pcoa1 = aitch_pcoa$vectors[,1], 
+                                pcoa2 = aitch_pcoa$vectors[,2])
+
+eigenvalues <- aitch_pcoa$values
+pc1_explained <- eigenvalues[1] / sum(eigenvalues) * 100
+pc2_explained <- eigenvalues[2] / sum(eigenvalues) * 100
+
+cat("PC1 explains", round(pc1_explained, 2), "% of the variance\n") 
+cat("PC2 explains", round(pc2_explained, 2), "% of the variance\n")
+
+aitch_pcoa_gland_df <- cbind(aitch_pcoa_df,gland = colData(tse)$Gland)
+
+funct_gland_plot <- ggplot(data = aitch_pcoa_gland_df, 
+                           aes(x = pcoa1, y = pcoa2, color = gland)) +
+  geom_point(size = 3) +
+  labs(x = "PCoA1 [16.0%]", y = "PCoA2 [9.3%]", ) +
+  theme_minimal() +
+  stat_ellipse(level=0.85) +
+  scale_color_manual(values = c("ST" = "darkgoldenrod1", "SP" = "chartreuse3"), aesthetics = c("fill", "colour"), name = "Gland Type") +  # Set custom colors
+  theme_bw() +
+  ggside::geom_xsidedensity(aes(fill = gland), alpha = 0.5, show.legend = FALSE) +
+  ggside::geom_ysidedensity(aes(fill = gland), alpha = 0.5, show.legend = FALSE) +
+  ggside::theme_ggside_void() +
+  #stat_ellipse(aes(x = pcoa1, y = pcoa2, color = gland), size = 0.8, level = 0.8)+
+  theme(text = element_text(size = 14),
+        legend.position = "bottom")
+
+
+aitch_dist_mat_funct <- as.matrix(aitch_dist_veg_funct)
+
+beta_test<-adonis2(
+  aitch_dist_veg_funct ~ Gland * Species,
+  data = colData(tse), permutations = 999, method="robust.aitchison", by = "margin", strata=metadata_funct$GroupID) 
+print(beta_test)
+
+```
+
+#Different abundance analysis for the metabolic pathways
+First I need to upload the data not normalized because ANCOM-BC does it's own normalization
+
+```{r}
+
+path.abundance2 <- fread("merged.pathabundances.tsv")
+path.abundance2 <- as_tibble(path.abundance2)
+
+colnames(path.abundance2)[1] <- "pathway"
+colnames(path.abundance2) <- gsub("AM.SC.94s-","", colnames(path.abundance2))
+colnames(path.abundance2) <- gsub("_S[0-9]+_L005_Abundance","", colnames(path.abundance2))
+
+pathab_clean2 <- path.abundance2 %>% filter(!str_detect(pathway, "UNMAPPED|UNINTEGRATED"))
+
+pathab_metab2 <- pathab_clean2 %>%
+  dplyr::filter(!grepl('\\|g_', pathway))%>% 
+  dplyr::filter(!grepl('\\|unclassified', pathway))
+
+pathab_metab_nogene2 <- pathab_metab2 %>%
+  mutate(pathway = gsub("^[^:]+: ", "", pathway))  
+
+pathab_nogene_noctr2 <- pathab_metab_nogene2 %>%
+  select(-FPI18814,
+         -FPI16198,
+         -FPI16234,
+         -FPI14705,
+         -FPI14657,
+         -FPI16208,
+         -FPI16166,
+         -FPI18908,
+         -FPI16190,
+         -FPI16236,
+         -FPI18944,
+         -FPI16209,
+         -FPI18916,
+         -FPI18822,
+         -FPI19319,
+         -FPI14659,
+         -FPI13958,
+         -FPI16175)
+
+ncol(pathab_nogene_noctr2) #77
+ncol(pathab_metab_nogene2) #95
+
+nrow(pathab_nogene_noctr2)
+
+
+pathab3_2 <- as.data.frame(pathab_nogene_noctr2) 
+rownames(pathab3_2)  <- pathab3_2$pathway
+pathab3_2 <- pathab3_2 %>% select(-pathway)
+
+pathab_matrix2 <- as.matrix(pathab3_2)
+
+
+tse_LWED <- tse2[, tse2$Species == "LWED"]
+tse_SIMP <- tse2[, tse2$Species == "SIMP"]
+# Check the subset
+tse_LWED
+tse_SIMP
+
+ancombc_fun_LWED = ancombc2(tse_LWED, tax_level = NULL,
+                                fix_formula = "Gland",
+                                p_adj_method = "holm", 
+                                pseudo_sens = TRUE, prv_cut = 0.10, 
+                                lib_cut = 1000, 
+                                s0_perc = 0.05,
+                                group = "Gland", 
+                                struc_zero = TRUE, neg_lb = TRUE,
+                                alpha = 0.05, n_cl = 2, verbose = TRUE,
+                                global = FALSE, pairwise = FALSE, dunnet = FALSE, trend = FALSE,
+                                iter_control = list(tol = 1e-4, max_iter = 100, 
+                                                    verbose = TRUE),
+                                em_control = list(tol = 1e-5, max_iter = 200),
+                                lme_control = lme4::lmerControl(),
+                                mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                                trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                            nrow = 2, 
+                                                                            byrow = TRUE)),
+                                                     node = list(2),
+                                                     solver = "ECOS",
+                                                     B = 10))
+
+
+ancombc_fun_SIMP = ancombc2(tse_SIMP, tax_level = NULL,
+                            fix_formula = "Gland",
+                            p_adj_method = "holm",
+                            pseudo_sens = TRUE, prv_cut = 0.10, 
+                            lib_cut = 1000, 
+                            s0_perc = 0.05,
+                            group = "Gland", 
+                            struc_zero = TRUE, neg_lb = TRUE,
+                            alpha = 0.05, n_cl = 2, verbose = TRUE,
+                            global = FALSE, pairwise = FALSE, dunnet = FALSE, trend = FALSE,
+                            iter_control = list(tol = 1e-4, max_iter = 100, 
+                                                verbose = TRUE),
+                            em_control = list(tol = 1e-5, max_iter = 200),
+                            lme_control = lme4::lmerControl(),
+                            mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                            trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                                        nrow = 2, 
+                                                                        byrow = TRUE)),
+                                                 node = list(2),
+                                                 solver = "ECOS",
+                                                 B = 10))
+
+saveRDS(ancombc_fun_LWED, file = "RDS/ANCOMBC_Function_LWED.rds")
+# Later, when you start a new R session, load it
+ancombc_fun_LWED <- readRDS("RDS/ANCOMBC_Function_LWED.rds")
+
+saveRDS(ancombc_fun_SIMP, file = "RDS/ANCOMBC_Function_SIMP.rds")
+# Later, when you start a new R session, load it
+ancombc_fun_SIMP <- readRDS("RDS/ANCOMBC_Function_SIMP.rds")
+
+sig.tax.ancom2fun_LWED= ancombc_fun_LWED$res %>% 
+  filter(diff_GlandST == TRUE) %>% #taxa identified as DA
+  #filter(passed_ss_GlandST == TRUE) %>%
+  filter(q_GlandST < 0.01) %>% #taxa with an ajd p-value of <0.05
+  arrange(desc(W_GlandST))
+
+sig.tax.ancom2fun_SIMP= ancombc_fun_SIMP$res %>% 
+  filter(diff_GlandST == TRUE) %>% #taxa identified as DA
+  filter(q_GlandST < 0.01) %>% #taxa with an ajd p-value of <0.05
+  arrange(desc(W_GlandST))
+
+
+ANCOM_funct_SIMP <- ggplot(sig.tax.ancom2fun_SIMP, aes(x = lfc_GlandST, y = reorder(taxon, -lfc_GlandST), fill = taxon)) +
+  geom_col(fill="#66B2FF") +  # Use geom_col() for bar plots
+  theme_bw()+
+  labs(
+    y = "Differentially Abundant Pathways (p-adj<0.01)",
+    x = "Log Fold Change (Effect Size)") +
+  geom_errorbar(aes(xmin = lfc_GlandST - se_GlandST, xmax = lfc_GlandST + se_GlandST), 
+                width = 0.3, position = position_dodge(0.05), color = "black") +
+  xlim(-1,0.8)+
+  #scale_fill_brewer(palette = "Spectral")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1), legend.position = "none") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.7) +  # Thicker line at y=0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", size = 0.7) +  # Thicker line at x=0
+  theme(panel.grid.major.x = element_line(size = 0.5)); ANCOM_funct_SIMP
+
+
+ANCOM_funct_LWED <- ggplot(sig.tax.ancom2fun_LWED, aes(x = lfc_GlandST, y = reorder(taxon, -lfc_GlandST), fill = taxon)) +
+  geom_col(fill="#66B2FF") +  # Use geom_col() for bar plots
+  theme_bw()+
+  labs(
+    y = "Differentially Abundant Pathways (p-adj<0.01)",
+    x = "Log Fold Change (Effect Size)") +
+  geom_errorbar(aes(xmin = lfc_GlandST - se_GlandST, xmax = lfc_GlandST + se_GlandST), 
+                width = 0.3, position = position_dodge(0.05), color = "black") +
+  xlim(-1,0.8)+
+  #scale_fill_brewer(palette = "Spectral")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1), legend.position = "none") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.7) +  # Thicker line at y=0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", size = 0.7) +  # Thicker line at x=0
+  theme(panel.grid.major.x = element_line(size = 0.5)); ANCOM_funct_LWED
+
+```
